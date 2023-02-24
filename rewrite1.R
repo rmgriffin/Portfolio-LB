@@ -1,33 +1,27 @@
 rm(list=ls())
 
-# Clear libraries loaded, if any https://stackoverflow.com/questions/7505547/detach-all-packages-while-working-in-r
-loadedNamespaces()
-invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE)) # Clear
-loadedNamespaces()
-
 # Setting up replicable environment
 install.packages("renv")
 library(renv)
-renv::init()
+renv::init(bare = TRUE)
 
 # ######################################
 # This code is based on code provided by Geret DePiper: "portfolio_efficiency_code_JIN.R"
 # to implement the decay factor
 # and Howard Townsend: "EfficientFrontier2.R"
 # ######################################
-require(readxl)
-require(tidyverse)
-require(priceR) #for standardizing price with inflation
-require(RColorBrewer)
-require(viridis)
-require(eeptools) #??
-require(openxlsx)
-require(grDevices)
-require(extrafont)
-library(boot)
-library(kernlab)
-library(reshape)
-library(matrixcalc)
+
+PKG <- c("tidyverse","readxl","priceR","RColorBrewer","viridis","openxlsx","grDevices","extrafont","boot",
+         "kernlab","reshape","matrixcalc")
+
+for (p in PKG) {
+  if(!require(p,character.only = TRUE)) {  
+    install.packages(p)
+    require(p,character.only = TRUE)}
+}
+rm(p,PKG)
+
+renv::snapshot() # Save package snapshot
 
 # Options
 theme_set(theme_bw() + 
@@ -109,10 +103,10 @@ LB_SUM2<-merge(NEFMCv2, LB_SUM, by=c("IYear")) %>%
 
 data<-LB_SUM2
 #Use this info (YEAR through N) if you need to go line-by-line to look at how the code is functioning
-YEAR=2016
-YEARS<-unique(data$IYear)
-j=length(unique(data$IYear))
-N=40
+YEAR=1993
+YEARS<-as.integer(unlist(unique(data %>% filter(IYear<=YEAR) %>% distinct(IYear))))
+j<-length(YEARS)
+N<-j
 
 #Run this function to add the decay and run and plot the frontiers generated
 #from quantiles of the distribution of annual revenue up until time t.
@@ -141,23 +135,22 @@ portfolio_var <- function(data,YEAR,YEARS,TAXA,N,j,EBFM) {
   
   #Adding the decay factor into the covariance matrix (Eqn. 2)
   d_2 <- d_2 %>% #R Why "YEAR - IYear + 1"? Treats reference year as in the past. 
-    dplyr::filter(IYear<=YEAR) %>% #R added line to remove unneeded obs
     mutate(WCatch = P_LAMBDA^(YEAR-IYear+1)*Catch, #check this with Geret because this was d_2$WCatch <- (P_LAMBDA^(YEAR-d_2$IYear+1))*d_2$Catch
            WAvgVal = WCatch*Price, #Value used to estimate omega. Omega= weighted average of catches over time with decay
            Lambda = P_LAMBDA^(YEAR-IYear+1),  #this is the decay value applied to each year.#ggplot (data=d_2, aes(x=desc(IYear), y=Lambda)) + geom_point() #check this with Geret because this was d_2$Lambda <- P_LAMBDA^(YEAR-d_2$IYear+1)
            WPrice = Lambda*Price,
            WVal = Lambda*Value)
   WAVG_CATCH <- aggregate(cbind(Value,WCatch,Lambda,WAvgVal,WPrice,WVal)~Taxonkey,data=d_2,FUN='sum') %>%
-    mutate(WCatch = WCatch/Lambda, #R Don't see this anywhere in the paper
+    mutate(WCatch = WCatch/Lambda, #R Annual average decay-weighted catch
            Omega = WAvgVal/WPrice, #R Looks good. average biomass. Omega= weighted average of catches over time with decay. Eqn. 3
            WVal = WVal/Lambda) #R Eq. 3
   MAX_CATCH <- aggregate(Catch~Taxonkey,data=d_2,FUN='max') %>%
     mutate(MaxCatch = Catch*P_GAMMA) %>%
     select(Taxonkey,MaxCatch)
-  WAVG_CATCH2 <- merge(MAX_CATCH,WAVG_CATCH,by='Taxonkey') %>%
+  WAVG_CATCH <- merge(MAX_CATCH,WAVG_CATCH,by='Taxonkey') %>%
     mutate(MaxWeight = MaxCatch/Omega, #R Eq. 4. maximum weight = maximum biomass/average biomass)
            Year = YEAR,
-           ImpWeight = Value/WVal, #R Summed net revenue divided by  implicit weight from actual return.
+           ImpWeight = Value/WVal, #R Summed net revenue divided by weighted average annual revenue. implicit weight from actual return.
            WRatio = ImpWeight/MaxWeight, #ratio of implicit to max weight
            CReturn = pmin(ImpWeight,MaxWeight)*WVal)
   DIFF_RETURNS <-cbind(sum(WAVG_CATCH$CReturn[which(WAVG_CATCH$Year==YEAR)]), sum(WAVG_CATCH$Value[which(WAVG_CATCH$Year==YEAR)]))
@@ -165,19 +158,18 @@ portfolio_var <- function(data,YEAR,YEARS,TAXA,N,j,EBFM) {
   #Estimating weighted Variance-Covariance matrix
   VAR_DATA <- merge(d_2,WAVG_CATCH, by='Taxonkey') %>%
     select('Taxonkey','IYear','Lambda.x','Value.x','WVal.y') %>%
-    rename(Year=IYear,
-           Lambda=Lambda.x,
-           Value=Value.x,
-           WVal=WVal.y) %>%
-    mutate(Value = Value-WVal) %>%
+    dplyr::rename(Year=IYear, #R Year
+           Lambda=Lambda.x, #R Decay weight
+           Value=Value.x, #R Annual rev
+           WVal=WVal.y) %>% #R Eq. 3
+    mutate(Value = Value-WVal) %>% #R Parentheticals eq. 4 
       select(!WVal)
   
   VAR_DATA1 <- subset(VAR_DATA, select=c('Taxonkey','Year','Value')) %>%
     cast(Taxonkey~Year)
   
-
   VAR_DATA <- VAR_DATA %>%
-    mutate(Value = Value*Lambda) %>%
+    mutate(Value = Value*Lambda) %>% #R Numerator eq. 4 (first two terms)
     select(!Lambda) %>%
     cast(Taxonkey~Year)
   
@@ -185,17 +177,18 @@ portfolio_var <- function(data,YEAR,YEARS,TAXA,N,j,EBFM) {
   
   VAR_DATA <- matrix(unlist(subset(VAR_DATA, select=-Taxonkey)),nrow=z, ncol=j) #z=number of spp. in portfolio, j=years in portfolio
   VAR_DATA1 <- matrix(unlist(subset(VAR_DATA1, select=-Taxonkey)),nrow=z, ncol=j)
-  VAR_COVAR <- VAR_DATA%*%t(VAR_DATA1)
-  VAR_COVAR <- VAR_COVAR/WAVG_CATCH$Lambda
-  pmean <- function(x,y) (x+y)/2
+  VAR_COVAR <- VAR_DATA%*%t(VAR_DATA1) #R Eq. 4 numerator
+  VAR_COVAR <- VAR_COVAR/WAVG_CATCH$Lambda #R Eq. 4
+  pmean <- function(x,y) (x+y)/2 #R Parallel mean function for two vectors
   VAR_COVAR <- pmean(VAR_COVAR,matrix(VAR_COVAR,nrow(VAR_COVAR),byrow=TRUE)) ##????
   
   #Estimate the variance, which will be minimized
   VAR_COVAR_SS <- diag(diag(VAR_COVAR[])) # puts the vector above into a diagonal matrix for use in optimizing based on single species assumptions 
-  MEAN_RETURNS <- matrix(WAVG_CATCH$WVal)
-  TOT_REVENUE <- aggregate(cbind(Value)~IYear, data=d_2, FUN='sum')
-  TARGET_RETURNS <- quantile(TOT_REVENUE$Value, seq(.00,1,by=.05))
-  MAX_WEIGHTS <- matrix(WAVG_CATCH$MaxWeight,nrow=z)
+  MEAN_RETURNS <- matrix(WAVG_CATCH$WVal) #R Eq. 3, mean annual decayed returns
+  TOT_REVENUE <- aggregate(cbind(Value)~IYear, data=d_2, FUN='sum') #R Tot rev/yr, all species
+  #TARGET_RETURNS <- quantile(TOT_REVENUE$Value, seq(.00,1,by=.05)) #R Quantiles of total rev/yr, all species
+  TARGET_RETURNS <- seq(1,max(TOT_REVENUE$Value),1) #R Quantiles of total rev/yr, all species
+  MAX_WEIGHTS <- matrix(WAVG_CATCH$MaxWeight,nrow=z) #R Eq. 4, max harvest weight per species over time horizon 
   #CONSTRAINT_MATRIX <- diag(z)
   #CONSTRAINT_MATRIX <- -(rbind(CONSTRAINT_MATRIX,t(MEAN_RETURNS)))
   #CONSTRAINTS <- -c(MAX_WEIGHTS,TARGET_RETURNS)
@@ -208,7 +201,7 @@ portfolio_var <- function(data,YEAR,YEARS,TAXA,N,j,EBFM) {
   
   #Changed the margins from 10^-4 because of the computational singularity issue
   #with some of the years
-  # TARGET<-0.5903352 
+  #TARGET<-50 
   for (TARGET in TARGET_RETURNS) {
     if(EBFM == TRUE){
       SOLUTION <- ipop(-MEAN_RETURNS,VAR_COVAR,t(-MEAN_RETURNS),-TARGET,
@@ -264,29 +257,38 @@ portfolio_var <- function(data,YEAR,YEARS,TAXA,N,j,EBFM) {
   
   #You would need the below if calculating the actual portfolios and risk gaps
   #See "XXXXXXX" code to do that.
-  # IMPLICIT_WEIGHTS = cbind(WAVG_CATCH$ImpWeight, WAVG_CATCH$Taxonkey)
-  # colnames(IMPLICIT_WEIGHTS) <- c("ImpWeight",'Taxonkey')
-  # 
-  # AP<-matrix(t(WAVG_CATCH$ImpWeight)%*%VAR_COVAR%*%WAVG_CATCH$ImpWeight)
-  # colnames(AP) <- 'ActualP'
-  # AP<-as.data.frame(cbind(AP, TARGET)) #you need to sqrt the AP to get SD
-  # 
-  # FP<-matrix(t(OPTIMAL_WEIGHTS)%*%VAR_COVAR%*%OPTIMAL_WEIGHTS)
-  # colnames(FP) <- 'FrontierP'
-  # FP<-as.data.frame(cbind(FP, TARGET)) #you need to sqrt the FP to get SD
+  IMPLICIT_WEIGHTS = cbind(WAVG_CATCH$ImpWeight, WAVG_CATCH$Taxonkey)
+  colnames(IMPLICIT_WEIGHTS) <- c("ImpWeight",'Taxonkey')
+
+  AP<-matrix(t(WAVG_CATCH$ImpWeight)%*%VAR_COVAR%*%WAVG_CATCH$ImpWeight)
+  colnames(AP) <- 'ActualP'
+  AP<-as.data.frame(cbind(AP, TARGET)) #you need to sqrt the AP to get SD
+
+  FP<-matrix(t(OPTIMAL_WEIGHTS)%*%VAR_COVAR%*%OPTIMAL_WEIGHTS)
+  colnames(FP) <- 'FrontierP'
+  FP<-as.data.frame(cbind(FP, TARGET)) #you need to sqrt the FP to get SD
   
   
   ############### Returns a list of data frames ############
-  optimums <- list ("MEAN_VAR"=MEAN_VAR,"OPTIMAL_WEIGHTS" =OPTIMAL_WEIGHTS, "COVARIANCE" =VAR_COVAR)
-  # , "IMPLICIT_WEIGHTS" = IMPLICIT_WEIGHTS, "ACTUAL_PORTOLIO"= AP, "FRONTIER_PORTFOLIO"=FP)
+  optimums <- list ("MEAN_VAR"=MEAN_VAR,"OPTIMAL_WEIGHTS" =OPTIMAL_WEIGHTS, "COVARIANCE" =VAR_COVAR, "IMPLICIT_WEIGHTS" = IMPLICIT_WEIGHTS, "ACTUAL_PORTOLIO"= AP, "FRONTIER_PORTFOLIO"=FP)
   return(optimums)
 } 
+
+test<-portfolio_var(data=LB_SUM2,YEAR=1993,YEARS=YEARS,TAXA=Taxonkey,N=N,j=j, EBFM = TRUE)
+
+## Problems with frontier portfolio, too many results (probably due to different optimal weights for different targets) - start here
+
+
+
+
 
 #Loop through the years so the frontier is going up until time t. 
 YEARS<-unique(LB_SUM2$IYear) #use if you are good looping through the whole time-series
 # otherwise specify the timeframe below
 # YEARS = 2012:2020
 FrontierResults<-NULL
+ImpResults<-NULL
+Portfolio<-NULL
 
 for (k in YEARS) {
   
@@ -313,6 +315,20 @@ for (k in YEARS) {
   Iteration<-LAST_YEAR
   
   FrontierResults <- rbind(All_EF, FrontierResults)
+  
+  ImpWeights <- a$IMPLICIT_WEIGHTS
+  Iteration<-LAST_YEAR
+  # Taxonkey<-
+  ImpWeights <- cbind(Iteration, ImpWeights)
+
+  ImpResults <- rbind(ImpWeights, ImpResults)
+  ImpResults <-as.data.frame(ImpResults)
+  
+  Act_Portfolio <- a$ACTUAL_PORTOLIO
+  Front_Portolio<- a$FRONTIER_PORTFOLIO
+  AF<-cbind(Iteration, Act_Portfolio, Front_Portolio)
+  
+  Portfolio<-rbind(AF, Portfolio)
   
   # ImpWeights <- a$IMPLICIT_WEIGHTS
   # Iteration<-LAST_YEAR
@@ -342,14 +358,22 @@ money<-LB_SUM2%>%
 ggplot(data=money, aes(x=IYear, y=val)) + geom_point()
 
 ### plot to check, but removing the first year (min(Iteration))
+# ggplot() +
+#   geom_line(data =FrontierResults %>%
+#               filter(!Iteration==min(Iteration)), aes(x= OptimizedStDev, y=OptimizedRevenue, color=Type))+
+#   # filter(!Iteration==min(Iteration)), aes(x= OptimizedStDev/1000000, y=OptimizedRevenue/1000000, color=Type))+
+#   # geom_point(data =money, aes(x = sd/1000000, y = val/1000000))+
+#   # geom_text(data = money, aes(x = sd/1000000, y = val/1000000,label = as.factor(IYear)), hjust=0.25, vjust=2) +
+#   labs(y ="Revenue (Hundred Million Dollars)", x = "Risk (SD of Revenue)") +
+#   facet_wrap(~Iteration, scales="free")
+# # ggsave(path = "Figures for Dec 22 Steering Committee meeting", filename = "NE Multispecies 11 spp with decay.png",
+# #        width = 25, height = 12, dpi = 120) 
+
 ggplot() +
-  geom_line(data =FrontierResults %>%
-              filter(!Iteration==min(Iteration)), aes(x= OptimizedStDev, y=OptimizedRevenue, color=Type))+
+  geom_line(data=FrontierResults %>%
+              filter(Iteration!=min(Iteration)), aes(x= OptimizedStDev, y=OptimizedRevenue, color=Type))+
   # filter(!Iteration==min(Iteration)), aes(x= OptimizedStDev/1000000, y=OptimizedRevenue/1000000, color=Type))+
   # geom_point(data =money, aes(x = sd/1000000, y = val/1000000))+
   # geom_text(data = money, aes(x = sd/1000000, y = val/1000000,label = as.factor(IYear)), hjust=0.25, vjust=2) +
-  labs(y ="Revenue (Hundred Million Dollars)", x = "Risk (SD of Revenue)") +
+  labs(y ="Revenue (Million Dollars)", x = "Risk (SD of Revenue)") +
   facet_wrap(~Iteration, scales="free")
-# ggsave(path = "Figures for Dec 22 Steering Committee meeting", filename = "NE Multispecies 11 spp with decay.png",
-#        width = 25, height = 12, dpi = 120) 
-
