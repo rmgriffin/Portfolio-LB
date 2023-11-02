@@ -276,7 +276,7 @@ portfolio_var <- function(data,YEAR,YEARS,TAXA,N,j,EBFM) {
 
 test<-portfolio_var(data=LB_SUM2,YEAR=1993,YEARS=YEARS,TAXA=Taxonkey,N=N,j=j, EBFM = TRUE)
 
-## Problems with frontier portfolio, too many results (probably due to different optimal weights for different targets) - start here
+
 
 
 
